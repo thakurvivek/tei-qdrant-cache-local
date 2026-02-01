@@ -125,7 +125,7 @@ async def run_load_test(
         for i in range(total_requests):
             # Prepare request data - select random text
             text_input = random.choice(sample_texts)
-            payload = {"inputs": text_input} # Send single text per request
+            payload = {"input": text_input} # OpenAI-compatible format (singular "input")
 
             # Create and schedule the task
             task = asyncio.create_task(

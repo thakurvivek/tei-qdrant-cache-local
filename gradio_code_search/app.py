@@ -176,5 +176,6 @@ if __name__ == "__main__":
     # Ensure Qdrant client is ready (initialization happens on import of qdrant_logic)
     # Build and launch the Gradio app
     app = build_gradio_app()
-    app.launch()
+    # Bind to all interfaces (0.0.0.0) for external access
+    app.launch(server_name="0.0.0.0", server_port=7860)
     logger.info("Gradio Application Stopped.")

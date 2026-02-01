@@ -149,19 +149,19 @@ See example of repository retreival in `gradio_code_search/` after finishing emb
     ```bash
     # Example using curl
     # First request for this text (should be a cache miss)
-    curl http://localhost:8080/embed \
+    curl http://localhost:8080/v1/embeddings \
       -X POST \
       -d '{"inputs": "This is the first request for this text."}' \
       -H 'Content-Type: application/json'
 
     # Send the *exact same* input again (should be a cache hit)
-    curl http://localhost:8080/embed \
+    curl http://localhost:8080/v1/embeddings \
       -X POST \
       -d '{"inputs": "This is the first request for this text."}' \
       -H 'Content-Type: application/json'
 
     # Send multiple inputs, some new, some potentially cached
-    curl http://localhost:8080/embed \
+    curl http://localhost:8080/v1/embeddings \
       -X POST \
       -d '{"inputs": ["This is a new text.", "This is the first request for this text.", "Another new one."]}' \
       -H 'Content-Type: application/json'

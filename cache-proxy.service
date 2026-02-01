@@ -1,0 +1,21 @@
+[Unit]
+Description=Embedding Cache Proxy Service
+After=network.target
+Wants=sglang-embedding.service
+
+[Service]
+Type=simple
+User=vvek
+WorkingDirectory=/home/vvek/deep/sglang-embedding-cache-setup/git/sglang-embedding-cache
+Environment="PATH=/home/vvek/miniconda3/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/vvek/deep/sglang-embedding-cache-setup/git/sglang-embedding-cache/cache_proxy/start-cache-proxy.sh
+Restart=on-failure
+RestartSec=10s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cache-proxy
+
+[Install]
+WantedBy=multi-user.target

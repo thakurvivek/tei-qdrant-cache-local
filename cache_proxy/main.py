@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Define batch size for requests sent TO the TEI endpoint
 # Adjust this based on model token limits and average chunk size
 # Start low (e.g., 8 or 16) and increase if needed.
-TEI_REQUEST_BATCH_SIZE = 32 # Example value, tune this!
+TEI_REQUEST_BATCH_SIZE = 64 # Example value, tune this!
 
 # --- Hashing Function ---
 def get_text_hash(text: str) -> uuid.UUID:
@@ -59,22 +59,34 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, default_response_class=ORJSONResponse)
+main = app  # Rename to 'main' for uvicorn -m flag
 # Use a persistent httpx client for connection pooling
 http_client = httpx.AsyncClient(timeout=60.0) # Adjust timeout as needed
 
-@app.post("/embed", response_model=List[List[float]])
-async def create_embeddings(request: schemas.EmbedRequest):
+@app.post("/v1/embeddings", response_model=dict)
+async def create_embeddings(request: Request):
     start_time = time.monotonic()
-    original_inputs = [request.inputs] if isinstance(request.inputs, str) else request.inputs
-    num_inputs = len(original_inputs)
-    logger.info(f"Received request to embed {num_inputs} texts.")
+    try:
+        # Parse request body for logging
+        body = await request.json()
+        logger.info(f"Received request body: {body}")
+        
+        # Validate and parse using Pydantic
+        embed_request = schemas.EmbedRequest(**body)
+        original_inputs = [embed_request.get_inputs()] if isinstance(embed_request.get_inputs(), str) else embed_request.get_inputs()
+        num_inputs = len(original_inputs)
+        logger.info(f"Received request to embed {num_inputs} texts.")
+    except Exception as e:
+        logger.error(f"Failed to parse request body: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid request: {str(e)}")
 
     if not original_inputs:
         return []
 
     # 1. Calculate Hashes (returns UUIDs)
     input_hashes: List[uuid.UUID] = [get_text_hash(text) for text in original_inputs]
-    logger.debug(f"Calculated UUIDs: {input_hashes}")
+    logger.info(f"Calculated UUIDs: {input_hashes}")
+    logger.info(f"UUID hex values: {[h.hex for h in input_hashes]}")
 
     # 2. Check Cache (Qdrant)
     cache_check_start = time.monotonic()
@@ -115,28 +127,45 @@ async def create_embeddings(request: schemas.EmbedRequest):
 
             inference_start = time.monotonic()
             # Prepare payload for this specific batch
-            tei_payload = {
-                "inputs": batch_texts,
-                "normalize": request.normalize, # Pass through relevant parameters
-                "prompt_name": request.prompt_name,
-                "prompt": request.prompt,
-            }
-            tei_payload = {k: v for k, v in tei_payload.items() if v is not None}
+            # Different engines use different field names
+            if config.settings.embedding_engine == "sglang":
+                # sglang uses "input" instead of "inputs"
+                tei_payload = {"input": batch_texts}
+            else:
+                # TEI, vllm, OpenAI use "inputs"
+                tei_payload = {"inputs": batch_texts}
+                # Only include normalize if provided (some engines may not support it)
+                if embed_request.normalize is not None:
+                    tei_payload["normalize"] = embed_request.normalize
+                # Include model parameter if provided
+                if embed_request.model is not None:
+                    tei_payload["model"] = embed_request.model
+                # Include encoding_format if provided (pass through from request)
+                if embed_request.encoding_format is not None:
+                    tei_payload["encoding_format"] = embed_request.encoding_format
 
-            logger.debug(f"Forwarding batch of {len(batch_texts)} texts to TEI (Indices: {batch_original_indices})")
+            # Build URL based on engine configuration
+            embed_url = config.settings.nginx_upstream_url
+            if config.settings.append_embed_path:
+                embed_url += "/v1/embeddings"
+
+            logger.debug(f"Forwarding batch of {len(batch_texts)} texts to {config.settings.embedding_engine} (Indices: {batch_original_indices})")
             try:
-                # Send the smaller batch to the TEI endpoint
-                response = await http_client.post(config.settings.nginx_upstream_url + "/embed", json=tei_payload)
+                # Send the smaller batch to the embedding endpoint
+                response = await http_client.post(embed_url, json=tei_payload)
                 response.raise_for_status() # Raise exception for 4xx/5xx errors
                 tei_result = response.json()
 
                 # Validate and extract embeddings from the response
-                if isinstance(tei_result, list):
+                # sglang returns {"data": [{"embedding": [...]}]
+                if isinstance(tei_result, dict) and 'data' in tei_result:
+                     batch_new_embeddings = [item['embedding'] for item in tei_result['data']]
+                elif isinstance(tei_result, list):
                      batch_new_embeddings = tei_result
                 elif isinstance(tei_result, dict) and 'embeddings' in tei_result:
                      batch_new_embeddings = tei_result['embeddings']
                 else:
-                     logger.error(f"Unexpected response structure from TEI for batch: {tei_result}")
+                     logger.error(f"Unexpected response structure from sglang for batch: {tei_result}")
                      all_batches_successful = False
                      continue # Skip storing for this failed batch
 
@@ -179,7 +208,7 @@ async def create_embeddings(request: schemas.EmbedRequest):
             # raise HTTPException(status_code=502, detail="Failed to process all embedding batches.")
 
 
-    # 6. Return Combined Results
+    # 6. Return Combined Results (OpenAI-compatible format)
     total_duration = time.monotonic() - start_time
     logger.info(f"Total request processing time: {total_duration:.4f}s")
 
@@ -209,9 +238,29 @@ async def create_embeddings(request: schemas.EmbedRequest):
     elif len(successful_embeddings) != num_inputs and not all_batches_successful:
          logger.warning(f"Returning {len(successful_embeddings)} embeddings out of {num_inputs} requested due to errors.")
          # Decide on API contract: return partial list or error? Returning partial list for now.
-         return successful_embeddings # Return only the ones that succeeded
+         # Build OpenAI-compatible response for partial results
+         data = [{"embedding": emb, "index": i, "object": "embedding"} for i, emb in enumerate(successful_embeddings)]
+         return {
+             "object": "list",
+             "data": data,
+             "model": embed_request.model or "default",
+             "usage": {
+                 "prompt_tokens": num_inputs,  # Approximate, could be improved with actual tokenization
+                 "total_tokens": num_inputs
+             }
+         }
 
-    return final_embeddings # Return the full list if all succeeded
+    # Build OpenAI-compatible response for full results
+    data = [{"embedding": emb, "index": i, "object": "embedding"} for i, emb in enumerate(final_embeddings)]
+    return {
+        "object": "list",
+        "data": data,
+        "model": embed_request.model or "default",
+        "usage": {
+            "prompt_tokens": num_inputs,  # Approximate, could be improved with actual tokenization
+            "total_tokens": num_inputs
+        }
+    }
 
 
 @app.get("/health")

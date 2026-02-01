@@ -55,29 +55,29 @@ async def retrieve_embeddings(point_ids: List[uuid.UUID]) -> Dict[uuid.UUID, Lis
     qdrant = get_qdrant_client()
     collection_name = settings.qdrant_collection
     try:
-        # *** Convert UUIDs to strings for the client call ***
-        ids_as_strings = [str(pid) for pid in point_ids]
-        logger.debug(f"Retrieving points with string IDs: {ids_as_strings}")
+        # *** Convert UUIDs to hex strings (without hyphens) for the client call ***
+        ids_as_hex_strings = [pid.hex for pid in point_ids]
+        logger.info(f"Retrieving points with hex string IDs: {ids_as_hex_strings}")
 
         results = await qdrant.retrieve(
             collection_name=collection_name,
-            ids=ids_as_strings, # Pass list of strings
+            ids=ids_as_hex_strings, # Pass list of hex strings
             with_payload=False,
             with_vectors=True
         )
 
-        # *** Convert string IDs received back to UUIDs for the return dict ***
+        # *** Convert hex string IDs received back to UUIDs for the return dict ***
         found_embeddings = {}
         for point in results:
             if point.vector:
                 try:
-                    # Qdrant returns string IDs, convert back to UUID for consistency
+                    # Qdrant returns hex string IDs, convert back to UUID for consistency
                     point_uuid = uuid.UUID(hex=point.id)
                     found_embeddings[point_uuid] = point.vector
                 except ValueError:
-                    logger.warning(f"Received non-UUID string ID from Qdrant retrieve: {point.id}. Skipping.")
+                    logger.warning(f"Received non-UUID hex string ID from Qdrant retrieve: {point.id}. Skipping.")
 
-        logger.debug(f"Qdrant retrieve found {len(found_embeddings)} embeddings for {len(point_ids)} requested UUIDs.")
+        logger.info(f"Qdrant retrieve found {len(found_embeddings)} embeddings for {len(point_ids)} requested UUIDs.")
         return found_embeddings
     except Exception as e:
         # Log the specific error, including potentially the IDs that caused it if possible
@@ -97,9 +97,9 @@ async def store_embeddings(texts: List[str], vectors: List[List[float]], point_i
     points_to_upsert = []
     for text, vector, point_id_uuid in zip(texts, vectors, point_ids):
         try:
-            # *** Convert UUID to string when creating PointStruct ***
+            # *** Convert UUID to hex string (without hyphens) when creating PointStruct ***
             point_struct = models.PointStruct(
-                id=str(point_id_uuid), # Pass ID as string
+                id=point_id_uuid.hex, # Pass ID as hex string without hyphens
                 vector=vector,
                 payload={"text": text}
             )
@@ -114,13 +114,13 @@ async def store_embeddings(texts: List[str], vectors: List[List[float]], point_i
         return
 
     try:
-        logger.debug(f"Upserting {len(points_to_upsert)} points with string IDs.")
+        logger.info(f"Upserting {len(points_to_upsert)} points with hex IDs: {[p.id for p in points_to_upsert]}")
         response = await qdrant.upsert(
             collection_name=collection_name,
             points=points_to_upsert,
-            wait=False
+            wait=True  # Wait for operation to complete before returning
         )
-        logger.debug(f"Qdrant upsert response status: {response.status}")
+        logger.info(f"Qdrant upsert response status: {response.status}")
     except Exception as e:
         # Log the specific error
         logger.error(f"Failed to store embeddings in Qdrant: {e}", exc_info=True)
