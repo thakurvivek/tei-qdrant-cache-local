@@ -1,7 +1,7 @@
 [Unit]
 Description=Embedding Cache Proxy Service
 After=network.target
-Wants=sglang-embedding.service
+Wants=sgl.emb.octen-0.6b.fp16.service
 
 [Service]
 Type=simple
