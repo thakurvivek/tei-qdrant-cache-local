@@ -169,10 +169,10 @@ if __name__ == "__main__":
     print(f"Using TEI Image = {tei_full_image}")
 
     # Read other necessary configs
-    qdrant_collection = env_config.get('QDRANT_COLLECTION', 'text_embedding_cache')
+    qdrant_collection = env_config.get('QDRANT_COLLECTION', 'text_embedding_cache_octen-0.6b-fp16')
     nginx_upstream_url = env_config.get('NGINX_UPSTREAM_URL', 'http://nginx:80') # Internal URL
     qdrant_host = env_config.get('QDRANT_HOST', 'qdrant') # Service name
-    qdrant_port = env_config.get('QDRANT_PORT', '6333') # Internal gRPC port
+    qdrant_port = env_config.get('QDRANT_PORT', '6336') # Internal gRPC port
 
     # --- Generate docker-compose.yml ---
     print(f"\nGenerating {DOCKER_COMPOSE_TPL}...")

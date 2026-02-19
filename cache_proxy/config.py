@@ -11,8 +11,8 @@ load_dotenv(dotenv_path=dotenv_path)
 
 class Settings(BaseSettings):
     qdrant_host: str = os.getenv("QDRANT_HOST", "localhost")
-    qdrant_port: int = int(os.getenv("QDRANT_PORT", 6333))
-    qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "text_embedding_cache")
+    qdrant_port: int = int(os.getenv("QDRANT_PORT", 6335))
+    qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "text_embedding_cache_octen-0.6b-fp16")
     embedding_dimension: int = int(os.getenv("EMBEDDING_DIMENSION", 0)) # Require explicit setting
     nginx_upstream_url: str = os.getenv("NGINX_UPSTREAM_URL", "http://localhost:8081") # Default if running proxy standalone
     cache_hash_function: Literal['sha256', 'md5'] = os.getenv("CACHE_HASH_FUNCTION", "sha256")

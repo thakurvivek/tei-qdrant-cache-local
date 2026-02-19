@@ -1,0 +1,90 @@
+[
+  {
+    "batch_size": 4,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.19917554813002425,
+    "p50_latency": 0.21265637000033166,
+    "p95_latency": 0.25046232600016083,
+    "p99_latency": 0.2538419669999712,
+    "requests_per_second": 393.94589153972066,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 8,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.20889558379993103,
+    "p50_latency": 0.21882569700028398,
+    "p95_latency": 0.2613936379993902,
+    "p99_latency": 0.27255947400044533,
+    "requests_per_second": 366.8924016188724,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 12,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.1784646442799658,
+    "p50_latency": 0.1809945479999442,
+    "p95_latency": 0.2576677680008288,
+    "p99_latency": 0.26063369900020916,
+    "requests_per_second": 383.68023929215593,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 16,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.19805185327997607,
+    "p50_latency": 0.21644807599932392,
+    "p95_latency": 0.24726350499986438,
+    "p99_latency": 0.25028803900022467,
+    "requests_per_second": 399.53966797394673,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 24,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.18846637572999497,
+    "p50_latency": 0.1915794829992592,
+    "p95_latency": 0.24785236199932115,
+    "p99_latency": 0.2599183290003566,
+    "requests_per_second": 384.73623766588156,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 32,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.1979314148100366,
+    "p50_latency": 0.19000426700040407,
+    "p95_latency": 0.2746271810001417,
+    "p99_latency": 0.27962153800035594,
+    "requests_per_second": 357.62624265328486,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 48,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.1779525361099786,
+    "p50_latency": 0.1839615690005303,
+    "p95_latency": 0.23567925299994386,
+    "p99_latency": 0.24415586899976915,
+    "requests_per_second": 409.57442640911717,
+    "cache_hit_rate": 0.0
+  },
+  {
+    "batch_size": 64,
+    "total_requests": 100,
+    "successful_requests": 100,
+    "avg_latency": 0.27278590662996066,
+    "p50_latency": 0.15691472999969847,
+    "p95_latency": 0.75373867000053,
+    "p99_latency": 0.7895030049994602,
+    "requests_per_second": 126.66196248368728,
+    "cache_hit_rate": 0.0
+  }
+]

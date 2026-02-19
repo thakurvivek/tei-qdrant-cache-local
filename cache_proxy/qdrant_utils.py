@@ -6,29 +6,44 @@ from qdrant_client.http.models import Distance, VectorParams
 from qdrant_client.http.exceptions import UnexpectedResponse
 from config import settings
 from typing import List, Dict
+import grpc
 
 logger = logging.getLogger(__name__)
 
 async_client = None
 
 def get_qdrant_client() -> AsyncQdrantClient:
-    """Gets the singleton async Qdrant client instance."""
+    """Gets the singleton async Qdrant client instance with optimized connection pool."""
     global async_client
     if async_client is None:
-        logger.info(f"Initializing Async Qdrant client for host: {settings.qdrant_host}:{settings.qdrant_port}")
-        async_client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+        logger.info(f"Initializing Async Qdrant client for host: {settings.qdrant_host}:{settings.qdrant_port} (gRPC)")
+        async_client = AsyncQdrantClient(
+            host=settings.qdrant_host,
+            grpc_port=settings.qdrant_port,  # Use grpc_port when prefer_grpc=True
+            prefer_grpc=True,  # Use gRPC for better performance
+            timeout=30.0,       # 30 second timeout
+        )
     return async_client
 
 async def ensure_collection_exists():
     """Ensures the configured Qdrant collection exists, creating it if necessary."""
-    # ... (This function remains the same as the previous Async version) ...
     qdrant = get_qdrant_client()
     collection_name = settings.qdrant_collection
+    logger.info(f"[QDRANT] Checking collection: {collection_name}")
     try:
-        await qdrant.get_collection(collection_name=collection_name)
-        logger.info(f"Qdrant collection '{collection_name}' already exists.")
-    except (UnexpectedResponse, ValueError) as e:
-        if isinstance(e, UnexpectedResponse) and e.status_code == 404 or "not found" in str(e).lower():
+        collection_info = await qdrant.get_collection(collection_name=collection_name)
+        logger.info(f"[QDRANT] Collection '{collection_name}' exists | Points: {collection_info.points_count}")
+    except (UnexpectedResponse, ValueError, grpc.aio.AioRpcError) as e:
+        # Check if it's a NOT_FOUND error (HTTP 404 or gRPC NOT_FOUND)
+        is_not_found = False
+        if isinstance(e, UnexpectedResponse) and e.status_code == 404:
+            is_not_found = True
+        elif isinstance(e, grpc.aio.AioRpcError) and e.code() == grpc.StatusCode.NOT_FOUND:
+            is_not_found = True
+        elif "not found" in str(e).lower():
+            is_not_found = True
+        
+        if is_not_found:
             logger.warning(f"Qdrant collection '{collection_name}' not found. Creating...")
             try:
                 await qdrant.create_collection(
@@ -57,7 +72,7 @@ async def retrieve_embeddings(point_ids: List[uuid.UUID]) -> Dict[uuid.UUID, Lis
     try:
         # *** Convert UUIDs to hex strings (without hyphens) for the client call ***
         ids_as_hex_strings = [pid.hex for pid in point_ids]
-        logger.info(f"Retrieving points with hex string IDs: {ids_as_hex_strings}")
+        logger.info(f"[QDRANT] Retrieving {len(point_ids)} points from collection '{collection_name}'")
 
         results = await qdrant.retrieve(
             collection_name=collection_name,
@@ -77,7 +92,7 @@ async def retrieve_embeddings(point_ids: List[uuid.UUID]) -> Dict[uuid.UUID, Lis
                 except ValueError:
                     logger.warning(f"Received non-UUID hex string ID from Qdrant retrieve: {point.id}. Skipping.")
 
-        logger.info(f"Qdrant retrieve found {len(found_embeddings)} embeddings for {len(point_ids)} requested UUIDs.")
+        logger.info(f"[QDRANT] Retrieved {len(found_embeddings)}/{len(point_ids)} points from collection '{collection_name}'")
         return found_embeddings
     except Exception as e:
         # Log the specific error, including potentially the IDs that caused it if possible
@@ -114,7 +129,7 @@ async def store_embeddings(texts: List[str], vectors: List[List[float]], point_i
         return
 
     try:
-        logger.info(f"Upserting {len(points_to_upsert)} points with hex IDs: {[p.id for p in points_to_upsert]}")
+        logger.info(f"[QDRANT] Upserting {len(points_to_upsert)} points to collection '{collection_name}'")
         response = await qdrant.upsert(
             collection_name=collection_name,
             points=points_to_upsert,

@@ -2,6 +2,7 @@
 import logging
 import hashlib
 import time
+import os # <--- IMPORT os module for environment variables
 import orjson # Faster JSON
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import ORJSONResponse
@@ -23,8 +24,33 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 # Define batch size for requests sent TO the TEI endpoint
 # Adjust this based on model token limits and average chunk size
-# Start low (e.g., 8 or 16) and increase if needed.
-TEI_REQUEST_BATCH_SIZE = 64 # Example value, tune this!
+# Start with 12 and tune based on performance testing
+TEI_REQUEST_BATCH_SIZE = int(os.getenv("TEI_REQUEST_BATCH_SIZE", "12"))
+
+# Retry configuration for connection errors
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_DELAY_BASE = float(os.getenv("RETRY_DELAY_BASE", "1.0"))  # Base delay in seconds
+RETRY_DELAY_MAX = float(os.getenv("RETRY_DELAY_MAX", "10.0"))   # Max delay in seconds
+
+# Delay between batches to give TEI service time to recover
+BATCH_DELAY_SECONDS = float(os.getenv("BATCH_DELAY_SECONDS", "0.5"))
+
+# --- Diagnostic Logging ---
+logger.info("=" * 60)
+logger.info("CACHE PROXY DIAGNOSTIC STARTUP")
+logger.info("=" * 60)
+logger.info(f"QDRANT_COLLECTION: {config.settings.qdrant_collection}")
+logger.info(f"QDRANT_HOST: {config.settings.qdrant_host}:{config.settings.qdrant_port}")
+logger.info(f"EMBEDDING_ENGINE: {config.settings.embedding_engine}")
+logger.info(f"NGINX_UPSTREAM_URL: {config.settings.nginx_upstream_url}")
+logger.info(f"APPEND_EMBED_PATH: {config.settings.append_embed_path}")
+logger.info(f"TEI_REQUEST_BATCH_SIZE: {TEI_REQUEST_BATCH_SIZE}")
+logger.info(f"EMBEDDING_DIMENSION: {config.settings.embedding_dimension}")
+logger.info(f"MAX_RETRIES: {MAX_RETRIES}")
+logger.info(f"RETRY_DELAY_BASE: {RETRY_DELAY_BASE}s")
+logger.info(f"RETRY_DELAY_MAX: {RETRY_DELAY_MAX}s")
+logger.info(f"BATCH_DELAY_SECONDS: {BATCH_DELAY_SECONDS}s")
+logger.info("=" * 60)
 
 # --- Hashing Function ---
 def get_text_hash(text: str) -> uuid.UUID:
@@ -60,8 +86,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, default_response_class=ORJSONResponse)
 main = app  # Rename to 'main' for uvicorn -m flag
-# Use a persistent httpx client for connection pooling
-http_client = httpx.AsyncClient(timeout=60.0) # Adjust timeout as needed
+# Use a persistent httpx client for connection pooling with limits
+http_client = httpx.AsyncClient(
+    timeout=60.0,
+    limits=httpx.Limits(
+        max_keepalive_connections=20,  # Max connections to keep alive
+        max_connections=50,            # Max total connections
+        keepalive_expiry=30.0           # Expire keepalive after 30s
+    )
+)
 
 @app.post("/v1/embeddings", response_model=dict)
 async def create_embeddings(request: Request):
@@ -92,7 +125,7 @@ async def create_embeddings(request: Request):
     cache_check_start = time.monotonic()
     cached_embeddings_map = await qdrant_utils.retrieve_embeddings(input_hashes)
     cache_check_duration = time.monotonic() - cache_check_start
-    logger.debug(f"Qdrant cache check took {cache_check_duration:.4f}s. Found {len(cached_embeddings_map)} items.")
+    logger.info(f"[CACHE] Collection: {config.settings.qdrant_collection} | Check took {cache_check_duration:.4f}s | Found {len(cached_embeddings_map)}/{num_inputs} items")
 
     # 3. Identify Hits and Misses
     final_embeddings = [None] * num_inputs
@@ -109,11 +142,13 @@ async def create_embeddings(request: Request):
             missed_hashes.append(text_hash_uuid)
 
     cache_hits = num_inputs - len(missed_texts)
-    logger.info(f"Cache Hits: {cache_hits}, Cache Misses: {len(missed_texts)}")
+    cache_hit_rate = (cache_hits / num_inputs * 100) if num_inputs > 0 else 0
+    logger.info(f"[CACHE] Hits: {cache_hits} | Misses: {len(missed_texts)} | Hit Rate: {cache_hit_rate:.1f}%")
 
-    # 4. Handle Misses (Call Nginx -> TEI) - WITH BATCHING
+    # 4. Handle Misses (Call Nginx -> TEI) - WITH BATCHING AND RETRY LOGIC
     if missed_texts:
-        logger.info(f"Processing {len(missed_texts)} cache misses in batches of {TEI_REQUEST_BATCH_SIZE}...")
+        logger.info(f"[SGLANG] Processing {len(missed_texts)} cache misses in batches of {TEI_REQUEST_BATCH_SIZE}...")
+        logger.info(f"[SGLANG] Target URL: {config.settings.nginx_upstream_url}")
         all_batches_successful = True # Flag to track if any batch failed
 
         # Iterate through missed items in smaller batches
@@ -125,7 +160,9 @@ async def create_embeddings(request: Request):
 
             if not batch_texts: continue # Should not happen, but safe check
 
-            inference_start = time.monotonic()
+            batch_num = i // TEI_REQUEST_BATCH_SIZE + 1
+            logger.info(f"[SGLANG] Batch {batch_num}: {len(batch_texts)} texts | Indices: {batch_original_indices}")
+
             # Prepare payload for this specific batch
             # Different engines use different field names
             if config.settings.embedding_engine == "sglang":
@@ -149,57 +186,101 @@ async def create_embeddings(request: Request):
             if config.settings.append_embed_path:
                 embed_url += "/v1/embeddings"
 
-            logger.debug(f"Forwarding batch of {len(batch_texts)} texts to {config.settings.embedding_engine} (Indices: {batch_original_indices})")
-            try:
-                # Send the smaller batch to the embedding endpoint
-                response = await http_client.post(embed_url, json=tei_payload)
-                response.raise_for_status() # Raise exception for 4xx/5xx errors
-                tei_result = response.json()
+            # Retry logic with exponential backoff
+            batch_succeeded = False
+            last_error = None
+            
+            for retry_attempt in range(MAX_RETRIES):
+                try:
+                    inference_start = time.monotonic()
+                    
+                    # Log retry attempt if not first try
+                    if retry_attempt > 0:
+                        retry_delay = min(RETRY_DELAY_BASE * (2 ** retry_attempt), RETRY_DELAY_MAX)
+                        logger.warning(f"[SGLANG] Batch {batch_num} retry {retry_attempt}/{MAX_RETRIES} after {retry_delay:.2f}s delay")
+                        await asyncio.sleep(retry_delay)
+                    
+                    logger.info(f"[SGLANG] Batch {batch_num} attempt {retry_attempt + 1}/{MAX_RETRIES} | URL: {embed_url}")
+                    
+                    # Send the smaller batch to the embedding endpoint
+                    response = await http_client.post(embed_url, json=tei_payload)
+                    response.raise_for_status() # Raise exception for 4xx/5xx errors
+                    tei_result = response.json()
 
-                # Validate and extract embeddings from the response
-                # sglang returns {"data": [{"embedding": [...]}]
-                if isinstance(tei_result, dict) and 'data' in tei_result:
-                     batch_new_embeddings = [item['embedding'] for item in tei_result['data']]
-                elif isinstance(tei_result, list):
-                     batch_new_embeddings = tei_result
-                elif isinstance(tei_result, dict) and 'embeddings' in tei_result:
-                     batch_new_embeddings = tei_result['embeddings']
-                else:
-                     logger.error(f"Unexpected response structure from sglang for batch: {tei_result}")
-                     all_batches_successful = False
-                     continue # Skip storing for this failed batch
+                    # Validate and extract embeddings from the response
+                    # sglang returns {"data": [{"embedding": [...]}]
+                    if isinstance(tei_result, dict) and 'data' in tei_result:
+                         batch_new_embeddings = [item['embedding'] for item in tei_result['data']]
+                    elif isinstance(tei_result, list):
+                         batch_new_embeddings = tei_result
+                    elif isinstance(tei_result, dict) and 'embeddings' in tei_result:
+                         batch_new_embeddings = tei_result['embeddings']
+                    else:
+                         logger.error(f"Unexpected response structure from sglang for batch: {tei_result}")
+                         last_error = f"Unexpected response structure: {tei_result}"
+                         continue # Try next retry
 
-                inference_duration = time.monotonic() - inference_start
-                logger.info(f"TEI inference took {inference_duration:.4f}s for batch of {len(batch_texts)} texts.")
+                    inference_duration = time.monotonic() - inference_start
+                    logger.info(f"[SGLANG] Batch {batch_num} completed in {inference_duration:.4f}s | {len(batch_texts)} texts | {inference_duration/len(batch_texts):.4f}s/text")
 
-                # Verify the number of embeddings received matches the number sent
-                if len(batch_new_embeddings) != len(batch_texts):
-                    logger.error(f"Mismatch in batch: requested {len(batch_texts)}, received {len(batch_new_embeddings)}.")
-                    all_batches_successful = False
-                    continue # Skip storing for this failed batch
+                    # Verify the number of embeddings received matches the number sent
+                    if len(batch_new_embeddings) != len(batch_texts):
+                        logger.error(f"Mismatch in batch: requested {len(batch_texts)}, received {len(batch_new_embeddings)}.")
+                        last_error = f"Embedding count mismatch: requested {len(batch_texts)}, received {len(batch_new_embeddings)}"
+                        continue # Try next retry
 
-                # 5. Populate Cache & Combine Results for this batch
-                # Store embeddings for this successful batch in Qdrant
-                await qdrant_utils.store_embeddings(batch_texts, batch_new_embeddings, batch_hashes_to_store)
+                    # 5. Populate Cache & Combine Results for this batch
+                    # Store embeddings for this successful batch in Qdrant
+                    store_start = time.monotonic()
+                    await qdrant_utils.store_embeddings(batch_texts, batch_new_embeddings, batch_hashes_to_store)
+                    store_duration = time.monotonic() - store_start
+                    logger.info(f"[QDRANT] Stored {len(batch_texts)} embeddings in {store_duration:.4f}s | Collection: {config.settings.qdrant_collection}")
 
-                # Place the received embeddings into the correct positions in the final list
-                for j, original_index in enumerate(batch_original_indices):
-                    final_embeddings[original_index] = batch_new_embeddings[j]
+                    # Place the received embeddings into the correct positions in the final list
+                    for j, original_index in enumerate(batch_original_indices):
+                        final_embeddings[original_index] = batch_new_embeddings[j]
 
-            except httpx.RequestError as e:
-                logger.error(f"HTTP request error for TEI batch (Indices: {batch_original_indices}): {e}", exc_info=True)
+                    batch_succeeded = True
+                    break # Success, exit retry loop
+
+                except httpx.ConnectError as e:
+                    # TCP connection failed - TEI service might be down or overloaded
+                    last_error = f"TCP connection failed: {str(e)}"
+                    logger.error(f"[SGLANG] Batch {batch_num} attempt {retry_attempt + 1} TCP connection error: {e}")
+                    # Will retry if attempts remain
+                except httpx.TimeoutException as e:
+                    # Request timed out
+                    last_error = f"Request timeout: {str(e)}"
+                    logger.error(f"[SGLANG] Batch {batch_num} attempt {retry_attempt + 1} timeout error: {e}")
+                    # Will retry if attempts remain
+                except httpx.HTTPStatusError as e:
+                    # HTTP error (4xx/5xx) - these are usually not retryable
+                    last_error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+                    logger.error(f"[SGLANG] Batch {batch_num} HTTP error {e.response.status_code}: {e.response.text[:200]}")
+                    # Don't retry HTTP errors (client errors 4xx, server errors 5xx)
+                    break
+                except httpx.RequestError as e:
+                    # Other request errors
+                    last_error = f"Request error: {str(e)}"
+                    logger.error(f"[SGLANG] Batch {batch_num} attempt {retry_attempt + 1} request error: {e}", exc_info=True)
+                    # Will retry if attempts remain
+                except Exception as e:
+                    # Unexpected errors
+                    last_error = f"Unexpected error: {str(e)}"
+                    logger.error(f"[SGLANG] Batch {batch_num} attempt {retry_attempt + 1} unexpected error: {e}", exc_info=True)
+                    # Don't retry unexpected errors
+                    break
+
+            if not batch_succeeded:
+                logger.error(f"[SGLANG] Batch {batch_num} FAILED after {MAX_RETRIES} attempts. Last error: {last_error}")
                 all_batches_successful = False
-                # Decide how to handle failed batches - here we just log and continue
-                # You might want to mark corresponding final_embeddings as None or raise an error later
-            except httpx.HTTPStatusError as e:
-                 logger.error(f"TEI service error {e.response.status_code} for batch (Indices: {batch_original_indices}): {e.response.text[:200]}")
-                 all_batches_successful = False
-            except Exception as e:
-                 logger.error(f"Error processing TEI response for batch (Indices: {batch_original_indices}): {e}", exc_info=True)
-                 all_batches_successful = False
+            else:
+                logger.info(f"[SGLANG] Batch {batch_num} SUCCEEDED")
 
-            # Optional small delay between batches if hitting rate limits or for smoother load
-            # await asyncio.sleep(0.05)
+            # Delay between batches to give TEI service time to recover
+            if i + TEI_REQUEST_BATCH_SIZE < len(missed_texts):  # Only delay if there are more batches
+                logger.debug(f"[SGLANG] Waiting {BATCH_DELAY_SECONDS}s before next batch...")
+                await asyncio.sleep(BATCH_DELAY_SECONDS)
 
         # After processing all batches, check if any failed
         if not all_batches_successful:
@@ -210,7 +291,7 @@ async def create_embeddings(request: Request):
 
     # 6. Return Combined Results (OpenAI-compatible format)
     total_duration = time.monotonic() - start_time
-    logger.info(f"Total request processing time: {total_duration:.4f}s")
+    logger.info(f"[SUMMARY] Total: {total_duration:.4f}s | Cache: {cache_check_duration:.4f}s | SGLANG: {total_duration - cache_check_duration:.4f}s | Items: {num_inputs}")
 
     # Final check: ensure all slots are filled (unless batches failed and we allowed partial results)
     if None in final_embeddings and all_batches_successful: # Check only if all batches were expected to succeed

@@ -94,9 +94,9 @@ See example of repository retreival in `gradio_code_search/` after finishing emb
         *   `HUGGING_FACE_HUB_TOKEN` (Optional): Your Hugging Face Hub token (starting with `hf_`), required only if `MODEL_ID` points to a private or gated model that needs authentication for download.
         * See more details in https://github.com/huggingface/text-embeddings-inference .
     *   **Qdrant Cache Configuration:**
-        *   `QDRANT_COLLECTION`: The name for the collection (similar to a table) within Qdrant where the text embeddings will be cached. Example: `text_embedding_cache`.
+        *   `QDRANT_COLLECTION`: The name for the collection (similar to a table) within Qdrant where the text embeddings will be cached. Example: `text_embedding_cache_octen-0.6b-fp16`.
         *   `QDRANT_HOST`: The hostname of the Qdrant service *within the Docker network*. This **must match the service name** defined for Qdrant in the `docker-compose.yml` file (e.g., `qdrant` if the service is named `qdrant`).
-        *   `QDRANT_PORT`: The internal gRPC port used by the Qdrant service within the Docker network. The default is `6333`.
+        *   `QDRANT_PORT`: The internal gRPC port used by the Qdrant service within the Docker network. The default is `6335`.
 
     *   **Cache Proxy Configuration:**
         *   `NGINX_UPSTREAM_URL`: The internal URL that the Cache Proxy uses to forward cache miss requests to the Nginx load balancer. This **must match the scheme, service name, and port** of the Nginx service defined in `docker-compose.yml`. Example: `http://nginx-internal-lb:80` (if the Nginx service is named `nginx-internal-lb` and listens on port 80 internally).
