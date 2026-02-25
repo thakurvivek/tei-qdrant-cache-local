@@ -69,7 +69,9 @@ async def retrieve_embeddings(point_ids: List[uuid.UUID]) -> Dict[uuid.UUID, Lis
         return {}
     qdrant = get_qdrant_client()
     collection_name = settings.qdrant_collection
-    try:
+    
+    # Helper function to perform the actual retrieval
+    async def _do_retrieve():
         # *** Convert UUIDs to hex strings (without hyphens) for the client call ***
         ids_as_hex_strings = [pid.hex for pid in point_ids]
         logger.info(f"[QDRANT] Retrieving {len(point_ids)} points from collection '{collection_name}'")
@@ -94,6 +96,33 @@ async def retrieve_embeddings(point_ids: List[uuid.UUID]) -> Dict[uuid.UUID, Lis
 
         logger.info(f"[QDRANT] Retrieved {len(found_embeddings)}/{len(point_ids)} points from collection '{collection_name}'")
         return found_embeddings
+    
+    # Try retrieval with auto-recovery for missing collection
+    try:
+        return await _do_retrieve()
+    except (UnexpectedResponse, ValueError, grpc.aio.AioRpcError) as e:
+        # Check if it's a NOT_FOUND error (collection missing)
+        is_not_found = False
+        if isinstance(e, UnexpectedResponse) and e.status_code == 404:
+            is_not_found = True
+        elif isinstance(e, grpc.aio.AioRpcError) and e.code() == grpc.StatusCode.NOT_FOUND:
+            is_not_found = True
+        elif "not found" in str(e).lower() and "collection" in str(e).lower():
+            is_not_found = True
+        
+        if is_not_found:
+            logger.warning(f"[QDRANT] Collection '{collection_name}' not found during retrieval. Auto-recreating...")
+            try:
+                await ensure_collection_exists()
+                logger.info(f"[QDRANT] Collection recreated. Retrying retrieval...")
+                return await _do_retrieve()
+            except Exception as recreate_e:
+                logger.error(f"[QDRANT] Failed to recreate collection: {recreate_e}", exc_info=True)
+                return {}
+        else:
+            # Log the specific error for non-NOT_FOUND exceptions
+            logger.error(f"Failed to retrieve embeddings from Qdrant for IDs {point_ids}: {e}", exc_info=True)
+            return {}
     except Exception as e:
         # Log the specific error, including potentially the IDs that caused it if possible
         logger.error(f"Failed to retrieve embeddings from Qdrant for IDs {point_ids}: {e}", exc_info=True)
@@ -128,7 +157,8 @@ async def store_embeddings(texts: List[str], vectors: List[List[float]], point_i
         logger.warning("No valid points constructed for upsert after potential errors.")
         return
 
-    try:
+    # Helper function to perform the actual upsert
+    async def _do_upsert():
         logger.info(f"[QDRANT] Upserting {len(points_to_upsert)} points to collection '{collection_name}'")
         response = await qdrant.upsert(
             collection_name=collection_name,
@@ -136,6 +166,32 @@ async def store_embeddings(texts: List[str], vectors: List[List[float]], point_i
             wait=True  # Wait for operation to complete before returning
         )
         logger.info(f"Qdrant upsert response status: {response.status}")
+        return response
+
+    # Try upsert with auto-recovery for missing collection
+    try:
+        await _do_upsert()
+    except (UnexpectedResponse, ValueError, grpc.aio.AioRpcError) as e:
+        # Check if it's a NOT_FOUND error (collection missing)
+        is_not_found = False
+        if isinstance(e, UnexpectedResponse) and e.status_code == 404:
+            is_not_found = True
+        elif isinstance(e, grpc.aio.AioRpcError) and e.code() == grpc.StatusCode.NOT_FOUND:
+            is_not_found = True
+        elif "not found" in str(e).lower() and "collection" in str(e).lower():
+            is_not_found = True
+        
+        if is_not_found:
+            logger.warning(f"[QDRANT] Collection '{collection_name}' not found during upsert. Auto-recreating...")
+            try:
+                await ensure_collection_exists()
+                logger.info(f"[QDRANT] Collection recreated. Retrying upsert...")
+                await _do_upsert()
+            except Exception as recreate_e:
+                logger.error(f"[QDRANT] Failed to recreate collection: {recreate_e}", exc_info=True)
+        else:
+            # Log the specific error for non-NOT_FOUND exceptions
+            logger.error(f"Failed to store embeddings in Qdrant: {e}", exc_info=True)
     except Exception as e:
         # Log the specific error
         logger.error(f"Failed to store embeddings in Qdrant: {e}", exc_info=True)
